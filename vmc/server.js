@@ -53,100 +53,140 @@ wss.on('connection', (ws) => {
   });
 });
 
-// POST /vend - Accept item array and simulate vending
-app.post('/vend', async (req, res) => {
-  const { items } = req.body;
+// WebSocket endpoint for vending events
 
-  // Validate input
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid items array. Expected non-empty array of item numbers.'
-    });
-  }
+wss.on('connection', (ws) => {
+  console.log('New WebSocket client connected');
 
-  // Check if already vending
-  if (vendingState.status === 'vending') {
-    return res.status(409).json({
-      success: false,
-      message: 'Vending machine is currently busy',
-      currentItems: vendingState.currentItems
-    });
-  }
-
-  // Update state to vending
-  vendingState.status = 'vending';
-  vendingState.currentItems = items;
-  vendingState.startTime = Date.now();
-
-  // Broadcast status change
-  broadcast({
+  // Send current status on connect
+  ws.send(JSON.stringify({
     type: 'status',
-    status: 'vending',
-    items: items,
-    message: 'Vending started'
-  });
-
-  // Respond immediately that vending has started
-  res.json({
-    success: true,
-    message: 'Vending started',
-    items: items,
-    estimatedTime: 5000 // 5 seconds
-  });
-
-  // Simulate vending process (5 seconds delay)
-  const vendingDelay = 5000;
-  
-  vendingState.timeout = setTimeout(() => {
-    // Complete vending
-    vendingState.status = 'idle';
-    const vendedItems = [...vendingState.currentItems];
-    vendingState.currentItems = [];
-    vendingState.startTime = null;
-    vendingState.timeout = null;
-
-    // Broadcast completion
-    broadcast({
-      type: 'vend-complete',
-      status: 'idle',
-      message: 'Vending completed successfully',
-      vendedItems: vendedItems,
-      timestamp: new Date().toISOString()
-    });
-
-    console.log(`Vending completed for items: ${vendedItems.join(', ')}`);
-  }, vendingDelay);
-});
-
-// GET /status - Return vending progress
-app.get('/status', (req, res) => {
-  let response = {
     status: vendingState.status,
-    timestamp: new Date().toISOString()
-  };
+    items: vendingState.currentItems
+  }));
 
-  if (vendingState.status === 'vending') {
-    const elapsed = Date.now() - vendingState.startTime;
-    response = {
-      ...response,
-      items: vendingState.currentItems,
-      elapsedTime: elapsed,
-      message: 'Vending in progress'
-    };
-  } else {
-    response.message = 'Machine is idle';
-  }
+  ws.on('message', (message) => {
+    let data;
+    try {
+      data = JSON.parse(message);
+    } catch (e) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid JSON'
+      }));
+      return;
+    }
 
-  res.json(response);
-});
+    // Handle vend command
+    if (data.type === 'vend') {
+      const { items } = data;
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    service: 'VMC Mock Server',
-    timestamp: new Date().toISOString()
+      // Validate input
+      if (!Array.isArray(items) || items.length === 0) {
+        ws.send(JSON.stringify({
+          type: 'vend-response',
+          success: false,
+          message: 'Invalid items array. Expected non-empty array of item numbers.'
+        }));
+        return;
+      }
+
+      // Check if already vending
+      if (vendingState.status === 'vending') {
+        ws.send(JSON.stringify({
+          type: 'vend-response',
+          success: false,
+          message: 'Vending machine is currently busy',
+          currentItems: vendingState.currentItems
+        }));
+        return;
+      }
+
+      // Update state to vending
+      vendingState.status = 'vending';
+      vendingState.currentItems = items;
+      vendingState.startTime = Date.now();
+
+      // Broadcast status change to all clients
+      broadcast({
+        type: 'status',
+        status: 'vending',
+        items: items,
+        message: 'Vending started'
+      });
+
+      // Respond to this client that vending has started
+      ws.send(JSON.stringify({
+        type: 'vend-response',
+        success: true,
+        message: 'Vending started',
+        items: items,
+        estimatedTime: 5000 // 5 seconds
+      }));
+
+      // Simulate vending process (5 seconds delay)
+      const vendingDelay = 5000;
+
+      vendingState.timeout = setTimeout(() => {
+        // Complete vending
+        vendingState.status = 'idle';
+        const vendedItems = [...vendingState.currentItems];
+        vendingState.currentItems = [];
+        vendingState.startTime = null;
+        vendingState.timeout = null;
+
+        // Broadcast completion to all clients
+        broadcast({
+          type: 'vend-complete',
+          status: 'idle',
+          message: 'Vending completed successfully',
+          vendedItems: vendedItems,
+          timestamp: new Date().toISOString()
+        });
+
+        console.log(`Vending completed for items: ${vendedItems.join(', ')}`);
+      }, vendingDelay);
+    }
+
+    // Handle status request
+    else if (data.type === 'status') {
+      let response = {
+        type: 'status',
+        status: vendingState.status,
+        timestamp: new Date().toISOString()
+      };
+
+      if (vendingState.status === 'vending') {
+        const elapsed = Date.now() - vendingState.startTime;
+        response = {
+          ...response,
+          items: vendingState.currentItems,
+          elapsedTime: elapsed,
+          message: 'Vending in progress'
+        };
+      } else {
+        response.message = 'Machine is idle';
+      }
+      ws.send(JSON.stringify(response));
+    }
+
+    // Health check (optional)
+    else if (data.type === 'health') {
+      ws.send(JSON.stringify({
+        type: 'health',
+        status: 'healthy',
+        service: 'VMC Mock Server',
+        timestamp: new Date().toISOString()
+      }));
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
   });
 });
 
